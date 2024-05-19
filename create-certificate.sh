@@ -33,6 +33,10 @@ LOG_FILE="/var/log/certbot_script.log"
 # Check if the log file exists, and create it if it doesn't
 if [ ! -e "$LOG_FILE" ]; then
   touch "$LOG_FILE"
+  if [ $? -ne 0 ]; then
+    echo "Failed to create log file: $LOG_FILE" >&2
+    exit 1
+  fi
 fi
 
 # Redirect stdout and stderr to the log file with date and time
@@ -56,22 +60,38 @@ reload_haproxy() {
   fi
 }
 
-# Function to handle certificate renewal
-renew_certificate() {
-  local domain_to_renew=$1
-  certbot renew \
-    --cert-name "$domain_to_renew" \
-    --quiet \
-    --deploy-hook "cat '$cert_dir$domain_to_renew/fullchain.pem' '$cert_dir$domain_to_renew/privkey.pem' > '/etc/haproxy/certs/$domain_to_renew.pem' && systemctl reload haproxy"
+# Function to copy certificates for a domain
+copy_certificate() {
+  local domain_to_copy=$1
+  cat "$cert_dir$domain_to_copy/fullchain.pem" "$cert_dir$domain_to_copy/privkey.pem" > "/etc/haproxy/certs/$domain_to_copy.pem"
   if [ $? -eq 0 ]; then
-    certificates_updated=true
-    log "Certificate for $domain_to_renew renewed successfully."
+    log "Certificate for $domain_to_copy copied successfully."
   else
-    log "Failed to renew certificate for $domain_to_renew."
+    log "Failed to copy certificate for $domain_to_copy."
   fi
 }
 
-# Check if a renewal is requested
+# Function to deploy certificates (copy and reload HAProxy)
+deploy_certificate() {
+  local domain_to_deploy=$1
+  copy_certificate "$domain_to_deploy"
+  reload_haproxy
+}
+
+# Placeholder for renewing certificates function
+renew_certificate() {
+  local domain_to_renew=$1
+  # Example command; replace with actual renew command
+  certbot renew --cert-name "$domain_to_renew" --quiet --deploy-hook "$0 -d copy -e $email"
+  if [ $? -eq 0 ]; then
+    certificates_updated=true
+    log "Certificate renewed for domain: $domain_to_renew."
+  else
+    log "Failed to renew certificate for domain: $domain_to_renew."
+  fi
+}
+
+# Check if a renewal or copy is requested
 if [ "$domain" = "renew" ]; then
   # Renew all certificates
   for domain_dir in $cert_dir*; do
@@ -90,6 +110,14 @@ if [ "$domain" = "renew" ]; then
       fi
     fi
   done
+elif [ "$domain" = "copy" ]; then
+  # Copy certificates for HAProxy
+  for domain_dir in $cert_dir*; do
+    if [ -d "$domain_dir" ]; then
+      domain_to_copy=$(basename "$domain_dir")
+      deploy_certificate "$domain_to_copy"
+    fi
+  done
 else
   # Create or renew the certificate for the specified domain
   certbot certonly \
@@ -101,12 +129,12 @@ else
     --dns-cloudflare-credentials /root/.secrets/cloudflare.ini \
     --dns-cloudflare-propagation-seconds 30 \
     -d "$domain" -d "*.$domain" \
-    --deploy-hook "cat '$cert_dir$domain/fullchain.pem' '$cert_dir$domain/privkey.pem' > '/etc/haproxy/certs/$domain.pem' && systemctl reload haproxy"
+    --deploy-hook "$0 -d copy -e $email"
   if [ $? -eq 0 ]; then
     certificates_updated=true
     log "Certificate creation/renewal successful for domain: $domain."
     # Add or update the cron job for certificate renewal only once
-    if ! crontab -l 2>/dev/null | grep -q "$0 -d renew -e $email"; then
+    if ! crontab -l 2>/dev/null | grep -F -q "$0 -d renew -e $email"; then
       CRON_CMD="0 0 * * * $0 -d renew -e $email"
       (crontab -l 2>/dev/null; echo "$CRON_CMD") | crontab -
     fi
